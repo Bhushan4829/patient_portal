@@ -124,7 +124,7 @@ model.fc = torch.nn.Sequential(
     torch.nn.Linear(model.fc.in_features, len(all_labels)),
     torch.nn.Sigmoid()
 )
-model.load_state_dict(torch.load("../best_model.pth"))
+model.load_state_dict(torch.load("../best_model.pth", map_location=torch.device('cpu')))
 model.to(device)
 model.eval()
 transform = transforms.Compose([

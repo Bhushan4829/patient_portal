@@ -1,5 +1,5 @@
 import React from 'react';
-require('dotenv').config();
+// require('dotenv').config();
 function Dashboard() {
     const dashboardUrl = process.env.REACT_APP_DASHBOARD_URL;
     const dashboardName = process.env.REACT_APP_DASHBOARD_NAME;

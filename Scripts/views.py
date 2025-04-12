@@ -1,133 +1,93 @@
-from flask import Blueprint, request, session, jsonify
-from db import get_db_connection  # Assuming you've abstracted database connection logic
-import bcrypt
+from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel
+from db import get_mimiciv_db_connection
 from summary import generate_patient_summary
-from gql import gql, Client
-from gql.transport.requests import RequestsHTTPTransport
-from flask import current_app
-from bcrypt import hashpw, gensalt
-from azure.identity import InteractiveBrowserCredential
-import configparser
-views_bp = Blueprint('views', __name__)
+import hashlib
 
-def get_config(section):
-    config = configparser.ConfigParser()
-    config.read('db_config.ini')
-    return {key: value for key, value in config.items(section)}
-config = get_config('graphql')
-def get_authenticated_transport():
-    app = InteractiveBrowserCredential()
-    scp = config['authenticated_transport']
-    result = app.get_token(scp)
+router = APIRouter()
 
-    if not result.token:
-        raise Exception("Could not get access token")
+class AuthRequest(BaseModel):
+    family_name: str
+    birth_date: str
+    identifier_value: str
 
-    transport = RequestsHTTPTransport(
-        url=config['url'],
-        use_json=True,
-        verify=True,  # Depends on your server's SSL setup
-        retries=3,
-        headers={
-            'Authorization': f'Bearer {result.token}',
-            'Content-Type': 'application/json'
-        }
-    )
-    return transport
+@router.post("/login")
+async def login(auth: AuthRequest):
+    raw_password = f"{auth.birth_date}{auth.family_name}"
+    salted_input = f"{auth.identifier_value}:{raw_password}"
+    expected_hash = hashlib.sha256(salted_input.encode('utf-8')).hexdigest()
 
-@views_bp.route('/login', methods=['POST'])
-def login():
-    first_name = request.json['first']
-    last_name = request.json['last']
-    password = request.json['password'].encode('utf-8')
+    print("Expected Hash:", expected_hash)
 
-    cnxn = get_db_connection()
+    cnxn = get_mimiciv_db_connection()
     cursor = cnxn.cursor()
-    cursor.execute("SELECT Id, PASSWORD FROM patients_with_passwords WHERE FIRST = ? AND LAST = ?", (first_name, last_name))
+    cursor.execute("""
+        SELECT user_id, patient_id, hashed_password 
+        FROM auth_user 
+        WHERE name = ? AND user_id = ?
+    """, (auth.family_name, auth.identifier_value))
     user = cursor.fetchone()
     cursor.close()
     cnxn.close()
 
-    if user and bcrypt.checkpw(password, user.PASSWORD.encode('utf-8')):
-        session['user_id'] = user.Id
-        return jsonify({"message": "Login successful", "patient_id": user.Id}), 200
-    else:
-        return jsonify({"message": "Invalid credentials"}), 401
-@views_bp.route('/signup', methods=['POST'])
-def signup():
-    first_name = request.json.get('first')
-    last_name = request.json.get('last')
-    birthdate = request.json.get('birthdate')
-    ssn = request.json.get('ssn')
-    password = request.json.get('password').encode('utf-8')
-    hashed_password = hashpw(password, gensalt()).decode('utf-8')
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
 
-    cnxn = get_db_connection()
+    db_hash = user.hashed_password
+    print("DB hash:", db_hash)
+
+    if db_hash == expected_hash:
+        return {"message": "Login successful", "patient_id": user.patient_id}
+    
+    raise HTTPException(status_code=401, detail="Invalid credentials")
+
+
+@router.post("/signup")
+async def signup(auth: AuthRequest):
+    raw_password = f"{auth.birth_date}{auth.family_name}"
+    print(f"Raw password: {raw_password}")
+    salted_input = f"{auth.identifier_value}:{raw_password}"
+    print(f"Salted input: {salted_input}")
+    hashed_password = hashlib.sha256(salted_input.encode('utf-8')).hexdigest()
+
+    cnxn = get_mimiciv_db_connection()
     cursor = cnxn.cursor()
 
     try:
-        # Check if the user already exists
-        check_user_query = """
-            SELECT Id FROM patients_with_passwords
-            WHERE FIRST = ? AND LAST = ? AND SSN = ?
-        """
-        cursor.execute(check_user_query, (first_name, last_name, ssn))
-        existing_user = cursor.fetchone()
+        cursor.execute("SELECT id FROM auth_user WHERE identifier_value = ?", (auth.identifier_value,))
+        if cursor.fetchone():
+            raise HTTPException(status_code=409, detail="User already exists")
 
-        if existing_user:
-            return jsonify({"message": "User already exists"}), 409
-
-        # Insert the new user record
-        create_user_query = """
-            INSERT INTO patients_with_passwords (FIRST, LAST, BIRTHDATE, SSN, PASSWORD)
-            VALUES (?, ?, ?, ?, ?)
-        """
-        cursor.execute(create_user_query, (first_name, last_name, birthdate, ssn, hashed_password))
+        cursor.execute("""
+            INSERT INTO auth_user (name, identifier_value, birthDate, raw_password, hashed_password, role, created_at)
+            VALUES (?, ?, ?, ?, ?, 'patient', CURRENT_TIMESTAMP)
+        """, (auth.family_name, auth.identifier_value, auth.birth_date, raw_password, hashed_password))
         cnxn.commit()
-
-        # Retrieve the ID of the newly created user
-        user_id = cursor.lastrowid
-        return jsonify({"message": "Signup successful", "patient_id": str(user_id)}), 200
-
-    except Exception as e:
-        current_app.logger.error('Error during signup: %s', str(e))
-        return jsonify({"error": "Error during signup process"}), 500
-
+        return {"message": "Signup successful", "patient_id": cursor.lastrowid}
     finally:
         cursor.close()
         cnxn.close()
 
+@router.get("/logout")
+async def logout():
+    return {"message": "Logged out successfully"}
 
-@views_bp.route('/logout', methods=['GET'])
-def logout():
-    session.pop('user_id', None)
-    return jsonify({"message": "Logged out"}), 200
+@router.get("/patient_data/{patient_id}")
+async def get_patient_data(patient_id: str):
+    cnxn = get_mimiciv_db_connection()
+    cursor = cnxn.cursor()
+    cursor.execute("""
+        SELECT id AS patient_id, name_family, gender, birthDate, identifier_value,
+               communication_language_coding_code, maritalStatus_coding_code, deceasedDateTime
+        FROM mimicpatient_demographics
+        WHERE id = ?
+    """, (patient_id,))
+    row = cursor.fetchone()
+    cursor.close()
+    cnxn.close()
 
-@views_bp.route('/patient_data/<patient_id>', methods=['GET'])
-def get_patient_data(patient_id):
-    try:
-        cnxn = get_db_connection()
-        cursor = cnxn.cursor()
-        query = "SELECT p.Id, COALESCE(le.LastVisitDate, 'No recent visit') AS LastVisitDate, COALESCE(lm.LatestMedication, 'No recent medications') AS RecentMedications, COALESCE(la.Allergies, 'No known allergies') AS Allergies, COALESCE(le.LatestEncounterDescription, 'No recent encounter') AS LatestEncounterDescription, COALESCE(li.LatestImmunizations, 'No immunizations recorded') AS LatestImmunizations, COALESCE(lim.BodySiteDescription, 'N/A') AS BodySiteDescription, COALESCE(lim.ModalityDescription, 'N/A') AS ModalityDescription, COALESCE(lim.SOPDescription, 'N/A') AS SOPDescription FROM patients p LEFT JOIN (SELECT e.PATIENT AS PATIENT_ID, e.DESCRIPTION AS LatestEncounterDescription, e.START AS LastVisitDate, ROW_NUMBER() OVER (PARTITION BY e.PATIENT ORDER BY e.START DESC) AS rn FROM encounters e WHERE e.DESCRIPTION IS NOT NULL) le ON p.Id = le.PATIENT_ID AND le.rn = 1 LEFT JOIN (SELECT m.PATIENT AS PATIENT_ID, m.DESCRIPTION AS LatestMedication, m.START AS MedicationStartDate, ROW_NUMBER() OVER (PARTITION BY m.PATIENT ORDER BY m.START DESC) AS rn FROM medications m WHERE m.DESCRIPTION IS NOT NULL) lm ON p.Id = lm.PATIENT_ID AND lm.rn = 1 LEFT JOIN (SELECT i.PATIENT AS PATIENT_ID, i.DESCRIPTION AS LatestImmunizations, i.DATE AS ImmunizationDate, ROW_NUMBER() OVER (PARTITION BY i.PATIENT ORDER BY i.DATE DESC) AS rn FROM immunizations i WHERE i.DESCRIPTION IS NOT NULL) li ON p.Id = li.PATIENT_ID AND li.rn = 1 LEFT JOIN (SELECT a.PATIENT AS PATIENT_ID, a.DESCRIPTION AS Allergies, a.START AS AllergyStartDate, ROW_NUMBER() OVER (PARTITION BY a.PATIENT ORDER BY a.START DESC) AS rn FROM allergies a WHERE a.DESCRIPTION IS NOT NULL) la ON p.Id = la.PATIENT_ID AND la.rn = 1 LEFT JOIN (SELECT isd.PATIENT AS PATIENT_ID, isd.BODYSITE_DESCRIPTION AS BodySiteDescription, isd.MODALITY_DESCRIPTION AS ModalityDescription, isd.SOP_DESCRIPTION AS SOPDescription, isd.DATE AS ImagingDate, ROW_NUMBER() OVER (PARTITION BY isd.PATIENT ORDER BY isd.DATE DESC) AS rn FROM imaging_studies isd WHERE isd.BODYSITE_DESCRIPTION IS NOT NULL) lim ON p.Id = lim.PATIENT_ID AND lim.rn = 1 WHERE p.Id = ?;"
-
-        print("Executing SQL Query:", query)
-        print("With patient ID:", patient_id)
-        cursor.execute(query, (patient_id,))
-
-        row = cursor.fetchone()
-        
-        if row:
-            # Transform the row into a dictionary using column headers
-            col_names = [desc[0] for desc in cursor.description]
-            patient_data = dict(zip(col_names, row))
-            summary = generate_patient_summary(patient_data)
-            return jsonify({'summary': summary, 'Details': patient_data})
-        else:
-            return jsonify({'message': 'No patient data found'}), 404
-
-    except Exception as e:
-        current_app.logger.error(f"Error fetching patient data: {str(e)}")
-        return jsonify({"error": "Error fetching data"}), 500
-    finally:
-        cursor.close()
-        cnxn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="Patient not found")
+    col_names = [desc[0] for desc in cursor.description]
+    patient_data = dict(zip(col_names, row))
+    return {"summary": generate_patient_summary(patient_data), "Details": patient_data}

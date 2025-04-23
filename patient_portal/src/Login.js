@@ -68,38 +68,40 @@ function Login() {
 
   return (
     <div className="login-page">
-      <div className="login-container">
-        <h2>MedilinkAI Login</h2>
-        <form onSubmit={handleLogin} className="login-form">
-          <input 
-            type="text" 
-            value={familyName} 
-            placeholder="Family Name" 
-            onChange={e => setFamilyName(e.target.value)} 
-            required
-          />
-          <input 
-            type="text" 
-            value={identifierValue} 
-            placeholder="Identifier (e.g., MRN)" 
-            onChange={e => setIdentifierValue(e.target.value)} 
-            required
-          />
-          <input 
-            type="date" 
-            value={birthDate} 
-            placeholder="Birth Date" 
-            onChange={e => setBirthDate(e.target.value)} 
-            required
-          />
-          <button type="submit">Login</button>
-          <button type="button" onClick={() => navigate('/signup')}>
-            No account? Sign up
-          </button>
-        </form>
+      <div className="login-left"></div>
+      <div className="login-right">
+        <div className="login-container">
+          <h2>Medlink Login</h2>
+          <form onSubmit={handleLogin} className="login-form">
+            <input 
+              type="text" 
+              value={familyName} 
+              placeholder="Family Name" 
+              onChange={e => setFamilyName(e.target.value)} 
+              required 
+            />
+            <input 
+              type="text" 
+              value={identifierValue} 
+              placeholder="Identifier (e.g., MRN)" 
+              onChange={e => setIdentifierValue(e.target.value)} 
+              required 
+            />
+            <input 
+              type="date" 
+              value={birthDate} 
+              onChange={e => setBirthDate(e.target.value)} 
+              required 
+            />
+            <button type="submit">Login</button>
+            <button type="button" onClick={() => navigate('/signup')}>
+              No account? Sign up
+            </button>
+          </form>
+        </div>
       </div>
     </div>
-  );
+);
 }
 
 export default Login;
